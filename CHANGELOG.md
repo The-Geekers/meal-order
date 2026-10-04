@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1
+
+- Ajout de la suppression définitive d’un membre inactif jamais utilisé.
+- Conservation automatique des membres liés à un ancien repas ou une ancienne commande.
+- Affichage du statut historique dans l’administration de l’équipe.
+
 ## 0.1.0
 
 - Première version exploitable.
