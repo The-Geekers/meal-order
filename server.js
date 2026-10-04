@@ -165,7 +165,7 @@ io.on('connection', socket => {
 });
 
 app.get('/', (req,res) => res.redirect('/order'));
-app.get('/health', (req,res) => res.json({ ok:true, version:'0.1.0' }));
+app.get('/health', (req,res) => res.json({ ok:true, version:'0.1.1' }));
 
 app.get('/order', (req,res) => {
   const meal = db.prepare("SELECT * FROM meals WHERE status='open' ORDER BY id DESC LIMIT 1").get();
@@ -235,7 +235,12 @@ app.get('/admin', adminOnly, (req,res) => {
 });
 
 app.get('/admin/people', adminOnly, (req,res) => {
-  const people = db.prepare('SELECT * FROM people ORDER BY active DESC,name COLLATE NOCASE').all();
+  const people = db.prepare(`SELECT p.*,
+    (SELECT COUNT(*) FROM meal_people mp WHERE mp.person_id=p.id) meal_count,
+    (SELECT COUNT(*) FROM orders o WHERE o.person_id=p.id) order_count
+    FROM people p
+    ORDER BY p.active DESC,p.name COLLATE NOCASE`).all()
+    .map(p => ({ ...p, history_count: Number(p.meal_count) + Number(p.order_count) }));
   res.render('people', renderLocals(req, { people, baseUrl:PUBLIC_BASE_URL }));
 });
 app.post('/admin/people', adminOnly, (req,res) => {
@@ -248,6 +253,27 @@ app.post('/admin/people/:id/toggle', adminOnly, (req,res) => {
 });
 app.post('/admin/people/:id/token', adminOnly, (req,res) => {
   const id=int(req.params.id); if(id) db.prepare('UPDATE people SET token=? WHERE id=?').run(token(),id); res.redirect('/admin/people');
+});
+app.post('/admin/people/:id/delete', adminOnly, (req,res) => {
+  const id=int(req.params.id);
+  if(!id) return res.sendStatus(400);
+  const person=db.prepare('SELECT * FROM people WHERE id=?').get(id);
+  if(!person) return res.sendStatus(404);
+  if(person.active) return res.status(409).render('message', renderLocals(req, {
+    heading:'Désactivation requise',
+    message:'Désactive cette personne avant de la supprimer.'
+  }));
+  const history=db.prepare(`SELECT
+    (SELECT COUNT(*) FROM meal_people WHERE person_id=?) meal_count,
+    (SELECT COUNT(*) FROM orders WHERE person_id=?) order_count`).get(id,id);
+  if(Number(history.meal_count) > 0 || Number(history.order_count) > 0) {
+    return res.status(409).render('message', renderLocals(req, {
+      heading:'Historique conservé',
+      message:'Cette personne apparaît dans un ancien repas ou une ancienne commande. Elle reste désactivée afin de préserver l’historique.'
+    }));
+  }
+  db.prepare('DELETE FROM people WHERE id=?').run(id);
+  res.redirect('/admin/people');
 });
 
 app.get('/admin/meals/new', adminOnly, (req,res) => {
@@ -330,5 +356,5 @@ app.use((err,req,res,next)=>{console.error(err);res.status(500).render('message'
 
 server.listen(PORT,'0.0.0.0',()=>{
   if(ADMIN_PASSWORD==='distillerie') console.warn('[SECURITE] Mot de passe admin par défaut actif. Change ADMIN_PASSWORD avant exposition publique.');
-  console.log(`Distillerie Repas v0.1.0 — http://0.0.0.0:${PORT}`);
+  console.log(`Distillerie Repas v0.1.1 — http://0.0.0.0:${PORT}`);
 });
