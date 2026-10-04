@@ -1,0 +1,3 @@
+<%- include('partials/head') %><%- include('partials/header') %><main class="order-shell"><div class="order-card"><div class="order-title"><div class="kicker">Commande repas</div><h1><%= meal ? meal.title : 'Aucune commande ouverte' %></h1></div><% if(meal){ %><div class="choice-section"><h2>Qui commande ?</h2><div class="hint">Sélectionne ton nom.</div><div class="select-grid"><% people.forEach(p=>{ %><a class="select-person" href="/o/<%= p.token %>"><%= p.name %></a><% }) %></div></div><% } else { %><div class="choice-section"><p>Aucun repas n’accepte de commande pour le moment.</p></div><% } %></div></main>
+
+</body></html>
