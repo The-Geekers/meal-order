@@ -40,8 +40,10 @@ CREATE TABLE IF NOT EXISTS meals (
 );
 CREATE TABLE IF NOT EXISTS meal_people (
   meal_id INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
-  person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
-  PRIMARY KEY (meal_id, person_id)
+  person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+  person_token TEXT NOT NULL,
+  person_name TEXT NOT NULL,
+  UNIQUE(meal_id, person_token)
 );
 CREATE TABLE IF NOT EXISTS categories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,11 +62,13 @@ CREATE TABLE IF NOT EXISTS items (
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   meal_id INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
-  person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+  person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+  person_token TEXT NOT NULL,
+  person_name TEXT NOT NULL,
   submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   distributed_at TEXT,
-  UNIQUE(meal_id, person_id)
+  UNIQUE(meal_id, person_token)
 );
 CREATE TABLE IF NOT EXISTS order_items (
   order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
@@ -75,6 +79,61 @@ CREATE INDEX IF NOT EXISTS idx_categories_meal ON categories(meal_id);
 CREATE INDEX IF NOT EXISTS idx_orders_meal ON orders(meal_id);
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
 `);
+
+function tableColumns(name) {
+  return db.prepare(`PRAGMA table_info(${name})`).all().map(r => r.name);
+}
+function migratePersonSnapshots() {
+  const mealPeopleOk = tableColumns('meal_people').includes('person_token');
+  const ordersOk = tableColumns('orders').includes('person_token');
+  if (mealPeopleOk && ordersOk) return;
+  console.log('[DB] Migration historique personnes vers snapshots...');
+  db.exec('PRAGMA foreign_keys=OFF;');
+  try {
+    db.exec('BEGIN;');
+    db.exec(`
+      CREATE TABLE meal_people_v2 (
+        meal_id INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
+        person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+        person_token TEXT NOT NULL,
+        person_name TEXT NOT NULL,
+        UNIQUE(meal_id, person_token)
+      );
+      INSERT INTO meal_people_v2(meal_id,person_id,person_token,person_name)
+      SELECT mp.meal_id,mp.person_id,p.token,p.name FROM meal_people mp JOIN people p ON p.id=mp.person_id;
+      CREATE TABLE orders_v2 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        meal_id INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
+        person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+        person_token TEXT NOT NULL,
+        person_name TEXT NOT NULL,
+        submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        distributed_at TEXT,
+        UNIQUE(meal_id, person_token)
+      );
+      INSERT INTO orders_v2(id,meal_id,person_id,person_token,person_name,submitted_at,updated_at,distributed_at)
+      SELECT o.id,o.meal_id,o.person_id,p.token,p.name,o.submitted_at,o.updated_at,o.distributed_at FROM orders o JOIN people p ON p.id=o.person_id;
+      DROP TABLE meal_people;
+      DROP TABLE orders;
+      ALTER TABLE meal_people_v2 RENAME TO meal_people;
+      ALTER TABLE orders_v2 RENAME TO orders;
+      CREATE INDEX IF NOT EXISTS idx_orders_meal ON orders(meal_id);
+      COMMIT;
+    `);
+  } catch (error) {
+    try { db.exec('ROLLBACK;'); } catch {}
+    throw error;
+  } finally {
+    db.exec('PRAGMA foreign_keys=ON;');
+  }
+  const issues = db.prepare('PRAGMA foreign_key_check').all();
+  if (issues.length) throw new Error(`Migration SQLite invalide: ${JSON.stringify(issues)}`);
+}
+migratePersonSnapshots();
+db.prepare('UPDATE categories SET max_choices=1 WHERE max_choices<>1').run();
+
+const MENU_PRESETS = ['Entrée','Plat','Accompagnement','Dessert','Boisson fraîche','Boisson chaude'];
 
 const app = express();
 const server = http.createServer(app);
@@ -114,10 +173,12 @@ function mealCategories(mealId) {
   return cats.map(c => ({ ...c, items: itemStmt.all(c.id) }));
 }
 function mealPeople(mealId) {
-  return db.prepare(`SELECT p.*, o.id order_id, o.submitted_at, o.updated_at, o.distributed_at
-    FROM people p JOIN meal_people mp ON mp.person_id=p.id
-    LEFT JOIN orders o ON o.person_id=p.id AND o.meal_id=mp.meal_id
-    WHERE mp.meal_id=? ORDER BY p.name COLLATE NOCASE`).all(mealId);
+  return db.prepare(`SELECT mp.person_id id, COALESCE(p.name,mp.person_name) name, mp.person_token token,
+    COALESCE(p.active,0) active, o.id order_id, o.submitted_at, o.updated_at, o.distributed_at
+    FROM meal_people mp
+    LEFT JOIN people p ON p.id=mp.person_id
+    LEFT JOIN orders o ON o.meal_id=mp.meal_id AND o.person_token=mp.person_token
+    WHERE mp.meal_id=? ORDER BY name COLLATE NOCASE`).all(mealId);
 }
 function mealStats(mealId) {
   const total = db.prepare('SELECT COUNT(*) n FROM meal_people WHERE meal_id=?').get(mealId).n;
@@ -135,8 +196,8 @@ function aggregate(mealId) {
     GROUP BY c.id,i.id ORDER BY c.sort_order,c.id,i.sort_order,i.id`).all(mealId);
 }
 function orderDetails(mealId) {
-  const rows = db.prepare(`SELECT o.id order_id,p.name,c.name category,i.name item,o.distributed_at
-    FROM orders o JOIN people p ON p.id=o.person_id
+  const rows = db.prepare(`SELECT o.id order_id,COALESCE(p.name,o.person_name) name,c.name category,i.name item,o.distributed_at
+    FROM orders o LEFT JOIN people p ON p.id=o.person_id
     LEFT JOIN order_items oi ON oi.order_id=o.id
     LEFT JOIN items i ON i.id=oi.item_id
     LEFT JOIN categories c ON c.id=i.category_id
@@ -165,12 +226,12 @@ io.on('connection', socket => {
 });
 
 app.get('/', (req,res) => res.redirect('/order'));
-app.get('/health', (req,res) => res.json({ ok:true, version:'0.1.1' }));
+app.get('/health', (req,res) => res.json({ ok:true, version:'0.2.0' }));
 
 app.get('/order', (req,res) => {
   const meal = db.prepare("SELECT * FROM meals WHERE status='open' ORDER BY id DESC LIMIT 1").get();
   if (!meal) return res.render('order-select', renderLocals(req, { meal:null, people:[] }));
-  const people = db.prepare(`SELECT p.* FROM people p JOIN meal_people mp ON mp.person_id=p.id WHERE mp.meal_id=? ORDER BY p.name COLLATE NOCASE`).all(meal.id);
+  const people = db.prepare(`SELECT p.* FROM people p JOIN meal_people mp ON mp.person_id=p.id WHERE mp.meal_id=? AND p.active=1 ORDER BY p.name COLLATE NOCASE`).all(meal.id);
   res.render('order-select', renderLocals(req, { meal, people }));
 });
 
@@ -180,7 +241,7 @@ app.get('/o/:token', (req,res) => {
   const meal = activeOpenMealForPerson(person.id);
   if (!meal) return res.render('message', renderLocals(req, { heading:`Bonjour ${person.name}`, message:'Aucune commande n’est ouverte pour le moment.' }));
   const categories = mealCategories(meal.id);
-  const order = db.prepare('SELECT * FROM orders WHERE meal_id=? AND person_id=?').get(meal.id, person.id);
+  const order = db.prepare('SELECT * FROM orders WHERE meal_id=? AND person_token=?').get(meal.id, person.token);
   const selected = order ? db.prepare('SELECT item_id FROM order_items WHERE order_id=?').all(order.id).map(r=>r.item_id) : [];
   res.render('order', renderLocals(req, { person, meal, categories, selected, saved:req.query.saved==='1' }));
 });
@@ -202,9 +263,9 @@ app.post('/o/:token', (req,res) => {
   }
   db.exec('BEGIN');
   try {
-    let order = db.prepare('SELECT * FROM orders WHERE meal_id=? AND person_id=?').get(meal.id, person.id);
+    let order = db.prepare('SELECT * FROM orders WHERE meal_id=? AND person_token=?').get(meal.id, person.token);
     if (!order) {
-      const r = db.prepare('INSERT INTO orders(meal_id,person_id) VALUES(?,?)').run(meal.id, person.id);
+      const r = db.prepare('INSERT INTO orders(meal_id,person_id,person_token,person_name) VALUES(?,?,?,?)').run(meal.id, person.id, person.token, person.name);
       order = { id: Number(r.lastInsertRowid) };
     } else {
       db.prepare('UPDATE orders SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(order.id);
@@ -235,12 +296,7 @@ app.get('/admin', adminOnly, (req,res) => {
 });
 
 app.get('/admin/people', adminOnly, (req,res) => {
-  const people = db.prepare(`SELECT p.*,
-    (SELECT COUNT(*) FROM meal_people mp WHERE mp.person_id=p.id) meal_count,
-    (SELECT COUNT(*) FROM orders o WHERE o.person_id=p.id) order_count
-    FROM people p
-    ORDER BY p.active DESC,p.name COLLATE NOCASE`).all()
-    .map(p => ({ ...p, history_count: Number(p.meal_count) + Number(p.order_count) }));
+  const people = db.prepare('SELECT * FROM people ORDER BY active DESC,name COLLATE NOCASE').all();
   res.render('people', renderLocals(req, { people, baseUrl:PUBLIC_BASE_URL }));
 });
 app.post('/admin/people', adminOnly, (req,res) => {
@@ -263,29 +319,35 @@ app.post('/admin/people/:id/delete', adminOnly, (req,res) => {
     heading:'Désactivation requise',
     message:'Désactive cette personne avant de la supprimer.'
   }));
-  const history=db.prepare(`SELECT
-    (SELECT COUNT(*) FROM meal_people WHERE person_id=?) meal_count,
-    (SELECT COUNT(*) FROM orders WHERE person_id=?) order_count`).get(id,id);
-  if(Number(history.meal_count) > 0 || Number(history.order_count) > 0) {
-    return res.status(409).render('message', renderLocals(req, {
-      heading:'Historique conservé',
-      message:'Cette personne apparaît dans un ancien repas ou une ancienne commande. Elle reste désactivée afin de préserver l’historique.'
-    }));
+  db.exec('BEGIN');
+  try {
+    db.prepare(`DELETE FROM orders WHERE person_id=? AND meal_id IN (SELECT id FROM meals WHERE status<>'closed')`).run(id);
+    db.prepare(`DELETE FROM meal_people WHERE person_id=? AND meal_id IN (SELECT id FROM meals WHERE status<>'closed')`).run(id);
+    db.prepare('DELETE FROM people WHERE id=?').run(id);
+    db.exec('COMMIT');
+    res.redirect('/admin/people');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
   }
-  db.prepare('DELETE FROM people WHERE id=?').run(id);
-  res.redirect('/admin/people');
 });
 
 app.get('/admin/meals/new', adminOnly, (req,res) => {
   const people = db.prepare('SELECT * FROM people WHERE active=1 ORDER BY name COLLATE NOCASE').all();
-  res.render('meal-new', renderLocals(req, { people }));
+  res.render('meal-new', renderLocals(req, { people, menuPresets:MENU_PRESETS }));
 });
 app.post('/admin/meals', adminOnly, (req,res) => {
   const title=String(req.body.title||'').trim(); if(!title) return res.redirect('/admin/meals/new');
   const r=db.prepare('INSERT INTO meals(title) VALUES(?)').run(title); const mealId=Number(r.lastInsertRowid);
   let ids=req.body.people??[]; if(!Array.isArray(ids)) ids=[ids];
-  const ins=db.prepare('INSERT OR IGNORE INTO meal_people(meal_id,person_id) VALUES(?,?)');
+  const ins=db.prepare(`INSERT OR IGNORE INTO meal_people(meal_id,person_id,person_token,person_name)
+    SELECT ?,id,token,name FROM people WHERE id=? AND active=1`);
   for(const v of ids){ const id=int(v); if(id) ins.run(mealId,id); }
+  let categories=req.body.categories??[]; if(!Array.isArray(categories)) categories=[categories];
+  const allowed=new Set(MENU_PRESETS);
+  const insertCategory=db.prepare('INSERT INTO categories(meal_id,name,max_choices,sort_order) VALUES(?,?,1,?)');
+  let sort=0;
+  for(const raw of categories){ const name=String(raw); if(allowed.has(name)) insertCategory.run(mealId,name,sort++); }
   res.redirect(`/admin/meals/${mealId}/edit`);
 });
 
@@ -300,13 +362,14 @@ app.post('/admin/meals/:id/people', adminOnly, (req,res) => {
   const mealId=int(req.params.id); const meal=getMeal(mealId); if(!meal || meal.status!=='draft') return res.redirect(`/admin/meals/${mealId}/edit`);
   let ids=req.body.people??[]; if(!Array.isArray(ids)) ids=[ids];
   db.prepare('DELETE FROM meal_people WHERE meal_id=?').run(mealId);
-  const ins=db.prepare('INSERT OR IGNORE INTO meal_people(meal_id,person_id) VALUES(?,?)');
+  const ins=db.prepare(`INSERT OR IGNORE INTO meal_people(meal_id,person_id,person_token,person_name)
+    SELECT ?,id,token,name FROM people WHERE id=? AND active=1`);
   for(const v of ids){const id=int(v);if(id)ins.run(mealId,id);} res.redirect(`/admin/meals/${mealId}/edit`);
 });
 app.post('/admin/meals/:id/categories', adminOnly, (req,res) => {
   const mealId=int(req.params.id); const meal=getMeal(mealId); if(!meal || meal.status!=='draft') return res.redirect(`/admin/meals/${mealId}/edit`);
-  const name=String(req.body.name||'').trim(); const max=Math.max(1,Math.min(10,int(req.body.max_choices)||1));
-  if(name){const n=db.prepare('SELECT COALESCE(MAX(sort_order),-1)+1 n FROM categories WHERE meal_id=?').get(mealId).n; db.prepare('INSERT INTO categories(meal_id,name,max_choices,sort_order) VALUES(?,?,?,?)').run(mealId,name,max,n);}
+  const name=String(req.body.name||'').trim();
+  if(name){const n=db.prepare('SELECT COALESCE(MAX(sort_order),-1)+1 n FROM categories WHERE meal_id=?').get(mealId).n; db.prepare('INSERT INTO categories(meal_id,name,max_choices,sort_order) VALUES(?,?,1,?)').run(mealId,name,n);}
   res.redirect(`/admin/meals/${mealId}/edit`);
 });
 app.post('/admin/categories/:id/items', adminOnly, (req,res) => {
@@ -356,5 +419,5 @@ app.use((err,req,res,next)=>{console.error(err);res.status(500).render('message'
 
 server.listen(PORT,'0.0.0.0',()=>{
   if(ADMIN_PASSWORD==='distillerie') console.warn('[SECURITE] Mot de passe admin par défaut actif. Change ADMIN_PASSWORD avant exposition publique.');
-  console.log(`Distillerie Repas v0.1.1 — http://0.0.0.0:${PORT}`);
+  console.log(`Distillerie Repas v0.2.0 — http://0.0.0.0:${PORT}`);
 });

@@ -1,14 +1,15 @@
-# La Distillerie — Commandes Repas v0.1.0
+# La Distillerie — Commandes Repas v0.2.0
 
 Webapp légère pour prendre les commandes repas d’une équipe événementielle et agréger les quantités en temps réel.
 
 ## Fonctionnalités
 
-- liste persistante des personnes ;
+- liste persistante des personnes, avec suppression définitive et snapshot historique ;
 - lien personnel stable par personne ;
 - création d’un repas et sélection des présents ;
-- catégories libres (plat, boisson froide, boisson chaude, dessert...) ;
-- 1 à N choix autorisés par catégorie ;
+- catégories activables par cartes : entrée, plat, accompagnement, dessert, boisson fraîche, boisson chaude ;
+- catégories libres supplémentaires ;
+- un seul choix par catégorie ;
 - ouverture / fermeture des commandes ;
 - modification tant que le repas est ouvert ;
 - compteur réponses / manquants ;

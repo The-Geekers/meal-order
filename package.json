@@ -1,6 +1,6 @@
 {
   "name": "distillerie-repas",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "Commandes repas temps réel — La Distillerie",
   "main": "server.js",
