@@ -40,10 +40,10 @@ CREATE TABLE IF NOT EXISTS meals (
 );
 CREATE TABLE IF NOT EXISTS meal_people (
   meal_id INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
-  person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+  person_id INTEGER NOT NULL,
   person_token TEXT NOT NULL,
   person_name TEXT NOT NULL,
-  UNIQUE(meal_id, person_token)
+  UNIQUE(meal_id, person_id)
 );
 CREATE TABLE IF NOT EXISTS categories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,13 +62,13 @@ CREATE TABLE IF NOT EXISTS items (
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   meal_id INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
-  person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+  person_id INTEGER NOT NULL,
   person_token TEXT NOT NULL,
   person_name TEXT NOT NULL,
   submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   distributed_at TEXT,
-  UNIQUE(meal_id, person_token)
+  UNIQUE(meal_id, person_id)
 );
 CREATE TABLE IF NOT EXISTS order_items (
   order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
@@ -94,23 +94,23 @@ function migratePersonSnapshots() {
     db.exec(`
       CREATE TABLE meal_people_v2 (
         meal_id INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
-        person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+        person_id INTEGER NOT NULL,
         person_token TEXT NOT NULL,
         person_name TEXT NOT NULL,
-        UNIQUE(meal_id, person_token)
+        UNIQUE(meal_id, person_id)
       );
       INSERT INTO meal_people_v2(meal_id,person_id,person_token,person_name)
       SELECT mp.meal_id,mp.person_id,p.token,p.name FROM meal_people mp JOIN people p ON p.id=mp.person_id;
       CREATE TABLE orders_v2 (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         meal_id INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE,
-        person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+        person_id INTEGER NOT NULL,
         person_token TEXT NOT NULL,
         person_name TEXT NOT NULL,
         submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         distributed_at TEXT,
-        UNIQUE(meal_id, person_token)
+        UNIQUE(meal_id, person_id)
       );
       INSERT INTO orders_v2(id,meal_id,person_id,person_token,person_name,submitted_at,updated_at,distributed_at)
       SELECT o.id,o.meal_id,o.person_id,p.token,p.name,o.submitted_at,o.updated_at,o.distributed_at FROM orders o JOIN people p ON p.id=o.person_id;
@@ -177,7 +177,7 @@ function mealPeople(mealId) {
     COALESCE(p.active,0) active, o.id order_id, o.submitted_at, o.updated_at, o.distributed_at
     FROM meal_people mp
     LEFT JOIN people p ON p.id=mp.person_id
-    LEFT JOIN orders o ON o.meal_id=mp.meal_id AND o.person_token=mp.person_token
+    LEFT JOIN orders o ON o.meal_id=mp.meal_id AND o.person_id=mp.person_id
     WHERE mp.meal_id=? ORDER BY name COLLATE NOCASE`).all(mealId);
 }
 function mealStats(mealId) {
@@ -201,7 +201,7 @@ function orderDetails(mealId) {
     LEFT JOIN order_items oi ON oi.order_id=o.id
     LEFT JOIN items i ON i.id=oi.item_id
     LEFT JOIN categories c ON c.id=i.category_id
-    WHERE o.meal_id=? ORDER BY p.name COLLATE NOCASE,c.sort_order,c.id,i.sort_order,i.id`).all(mealId);
+    WHERE o.meal_id=? ORDER BY name COLLATE NOCASE,c.sort_order,c.id,i.sort_order,i.id`).all(mealId);
   const map = new Map();
   for (const r of rows) {
     if (!map.has(r.order_id)) map.set(r.order_id, { order_id: r.order_id, name: r.name, distributed_at: r.distributed_at, choices: [] });
@@ -241,7 +241,7 @@ app.get('/o/:token', (req,res) => {
   const meal = activeOpenMealForPerson(person.id);
   if (!meal) return res.render('message', renderLocals(req, { heading:`Bonjour ${person.name}`, message:'Aucune commande n’est ouverte pour le moment.' }));
   const categories = mealCategories(meal.id);
-  const order = db.prepare('SELECT * FROM orders WHERE meal_id=? AND person_token=?').get(meal.id, person.token);
+  const order = db.prepare('SELECT * FROM orders WHERE meal_id=? AND person_id=?').get(meal.id, person.id);
   const selected = order ? db.prepare('SELECT item_id FROM order_items WHERE order_id=?').all(order.id).map(r=>r.item_id) : [];
   res.render('order', renderLocals(req, { person, meal, categories, selected, saved:req.query.saved==='1' }));
 });
@@ -263,7 +263,7 @@ app.post('/o/:token', (req,res) => {
   }
   db.exec('BEGIN');
   try {
-    let order = db.prepare('SELECT * FROM orders WHERE meal_id=? AND person_token=?').get(meal.id, person.token);
+    let order = db.prepare('SELECT * FROM orders WHERE meal_id=? AND person_id=?').get(meal.id, person.id);
     if (!order) {
       const r = db.prepare('INSERT INTO orders(meal_id,person_id,person_token,person_name) VALUES(?,?,?,?)').run(meal.id, person.id, person.token, person.name);
       order = { id: Number(r.lastInsertRowid) };
